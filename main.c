@@ -2,8 +2,8 @@
 #include <X11/Xutil.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <pthread.h>
+#include <string.h>
 #include "emulator.h"
  
 static Window window;
@@ -12,28 +12,26 @@ static int width, height;
 static int screen_no;
 static chip8_t *chip8;
 static const int multiplier = 8;
-static const long event_mask = (KeyPressMask | KeyReleaseMask);
+static const long event_mask = (KeyPressMask | KeyReleaseMask | ExposureMask);
 static pthread_mutex_t event_lock = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t event_cond = PTHREAD_COND_INITIALIZER;
+static _Bool handling_event = 0;
 
 void redraw_game(chip8_t *caller, chip8_callback_type_t type) {
-	for (int y=0; y<height-1; y+=multiplier) {
-		for (int x=0; x<width-1; x+=multiplier) {
-			_Bool is_white = caller->framebuffer[x/multiplier][y/multiplier];
-			if (caller->timers.sound > 0) is_white = !is_white;
-			pthread_mutex_lock(&event_lock);
-			XSetForeground(display, DefaultGC(display, screen_no), (0xFFFFFF * !!is_white));
-			XFillRectangle(
-				display,
-				window,
-				DefaultGC(display, screen_no),
-				x,
-				y,
-				multiplier,
-				multiplier
-			);
-			pthread_mutex_unlock(&event_lock);
-		}
-	}
+	XExposeEvent expose_event;
+	memset(&expose_event, 0, sizeof(XExposeEvent));
+	expose_event.type = Expose;
+	expose_event.window = window;
+	expose_event.send_event = 1;
+	handling_event = 1;
+	pthread_mutex_lock(&event_lock);
+	while (XPending(display)) pthread_cond_wait(&event_cond, &event_lock);
+	pthread_mutex_unlock(&event_lock);
+	Status status = XSendEvent(display, window, 0, 0, (XEvent *)&expose_event);
+	XFlush(display);
+	pthread_mutex_lock(&event_lock);
+	while (handling_event) pthread_cond_wait(&event_cond, &event_lock);
+	pthread_mutex_unlock(&event_lock);
 }
 
 int main(int argc, char **argv) {
@@ -41,10 +39,14 @@ int main(int argc, char **argv) {
 		fprintf(stderr, "Usage: %s <program>\n", *argv);
 		return 1;
 	}
+	if (!XInitThreads()) {
+		fprintf(stderr, "Failed to initialize multi-threading for X11.\n");
+		return 1;
+	}
 	display = XOpenDisplay(NULL);
 	if (display == NULL) {
 		fprintf(stderr, "Cannot open display\n");
-		exit(1);
+		return 1;
 	}
 
 	// Create window
@@ -77,39 +79,58 @@ int main(int argc, char **argv) {
 	char input_buffer[2];
 	KeySym key_symbol;
 	input_buffer[1] = 0;
+	_Bool first_loop = 1;
 	while (1) {
-		pthread_mutex_lock(&event_lock);
-		if (XCheckWindowEvent(display, window, event_mask, &event)) {
-			if (!XLookupString(&event.xkey, input_buffer, 1, &key_symbol, NULL)) input_buffer[0] = 0;
+		handling_event = 0;
+		if (!first_loop) {
+			pthread_cond_signal(&event_cond);
 			pthread_mutex_unlock(&event_lock);
-			char c = *input_buffer;
-			if ((c >= 'a') && (c <= 'z')) c -= 0x20;
-			unsigned char chip8_key = 0x10;
-			// NOTE TO FUTURE READERS: This is not the right way to do this.
-			switch (c) {
-				#define case(a,b) case a: chip8_key = b; break
-				case('1',0x1); case('2',0x2);
-				case('3',0x3); case('4',0xC);
-				case('Q',0x4); case('W',0x5);
-				case('E',0x6); case('R',0xD);
-				case('A',0x7); case('S',0x8);
-				case('D',0x9); case('F',0xE);
-				case('Z',0xA); case('X',0x0);
-				case('C',0xB); case('V',0xF);
-				#undef case
+		}
+		else first_loop = 0;
+		XNextEvent(display, &event);
+		pthread_mutex_lock(&event_lock);
+		handling_event = 1;
+		if (event.type == Expose) {
+			for (int y=0; y<height-1; y+=multiplier) {
+				for (int x=0; x<width-1; x+=multiplier) {
+					_Bool is_white = chip8->framebuffer[x/multiplier][y/multiplier];
+					if (chip8->timers.sound > 0) is_white = !is_white;
+					XSetForeground(display, DefaultGC(display, screen_no), (0xFFFFFF * !!is_white));
+					XFillRectangle(
+						display,
+						window,
+						DefaultGC(display, screen_no),
+						x,
+						y,
+						multiplier,
+						multiplier
+					);
+				}
 			}
-			if (chip8_key == 0x10) continue;
-			switch (event.type) {
-				case KeyPress:
-					chip8->keyboard_mask |= (1UL << chip8_key);
-					break;
-				case KeyRelease:
-					chip8->keyboard_mask &= ~(1UL << chip8_key);
-					break;
+			continue;
+		}
+		if (!XLookupString(&event.xkey, input_buffer, 1, &key_symbol, NULL)) input_buffer[0] = 0;
+		char c = *input_buffer;
+		if ((c >= 'a') && (c <= 'z')) c -= 0x20;
+		unsigned char chip8_key = 0x10;
+		static const char *keymap = "X123QWEASDZC4RFV";
+		for (unsigned char i=0; i<0x10; i++) {
+			if (keymap[i] == c) {
+				chip8_key = i;
+				break;
 			}
 		}
-		else pthread_mutex_unlock(&event_lock);
+		if (chip8_key == 0x10) continue;
+		switch (event.type) {
+			case KeyPress:
+				chip8->keyboard_mask |= (1UL << chip8_key);
+				break;
+			case KeyRelease:
+				chip8->keyboard_mask &= ~(1UL << chip8_key);
+				break;
+		}
 	}
+	handling_event = 0;
 	XCloseDisplay(display);
 	return 0;
 }
