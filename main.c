@@ -39,10 +39,6 @@ int main(int argc, char **argv) {
 		fprintf(stderr, "Usage: %s <program>\n", *argv);
 		return 1;
 	}
-	if (!XInitThreads()) {
-		fprintf(stderr, "Failed to initialize multi-threading for X11.\n");
-		return 1;
-	}
 	display = XOpenDisplay(NULL);
 	if (display == NULL) {
 		fprintf(stderr, "Cannot open display\n");
