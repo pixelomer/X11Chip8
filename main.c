@@ -13,9 +13,6 @@ static int screen_no;
 static chip8_t *chip8;
 static const int multiplier = 8;
 static const long event_mask = (KeyPressMask | KeyReleaseMask | ExposureMask);
-static pthread_mutex_t event_lock = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t event_cond = PTHREAD_COND_INITIALIZER;
-static _Bool handling_event = 0;
 
 void redraw_game(chip8_t *caller, chip8_callback_type_t type) {
 	XExposeEvent expose_event;
@@ -23,20 +20,19 @@ void redraw_game(chip8_t *caller, chip8_callback_type_t type) {
 	expose_event.type = Expose;
 	expose_event.window = window;
 	expose_event.send_event = 1;
-	handling_event = 1;
-	pthread_mutex_lock(&event_lock);
-	while (XPending(display)) pthread_cond_wait(&event_cond, &event_lock);
-	pthread_mutex_unlock(&event_lock);
+	XLockDisplay(display);
 	Status status = XSendEvent(display, window, 0, 0, (XEvent *)&expose_event);
 	XFlush(display);
-	pthread_mutex_lock(&event_lock);
-	while (handling_event) pthread_cond_wait(&event_cond, &event_lock);
-	pthread_mutex_unlock(&event_lock);
+	XUnlockDisplay(display);
 }
 
 int main(int argc, char **argv) {
 	if (argc <= 1) {
 		fprintf(stderr, "Usage: %s <program>\n", *argv);
+		return 1;
+	}
+	if (!XInitThreads()) {
+		fprintf(stderr, "Couldn't initialize threads\n");
 		return 1;
 	}
 	display = XOpenDisplay(NULL);
@@ -77,16 +73,9 @@ int main(int argc, char **argv) {
 	input_buffer[1] = 0;
 	_Bool first_loop = 1;
 	while (1) {
-		handling_event = 0;
-		if (!first_loop) {
-			pthread_cond_signal(&event_cond);
-			pthread_mutex_unlock(&event_lock);
-		}
-		else first_loop = 0;
 		XNextEvent(display, &event);
-		pthread_mutex_lock(&event_lock);
-		handling_event = 1;
 		if (event.type == Expose) {
+			XLockDisplay(display);
 			for (int y=0; y<height-1; y+=multiplier) {
 				for (int x=0; x<width-1; x+=multiplier) {
 					_Bool is_white = chip8->framebuffer[x/multiplier][y/multiplier];
@@ -103,6 +92,7 @@ int main(int argc, char **argv) {
 					);
 				}
 			}
+			XUnlockDisplay(display);
 			continue;
 		}
 		if (!XLookupString(&event.xkey, input_buffer, 1, &key_symbol, NULL)) input_buffer[0] = 0;
@@ -126,7 +116,6 @@ int main(int argc, char **argv) {
 				break;
 		}
 	}
-	handling_event = 0;
 	XCloseDisplay(display);
 	return 0;
 }
