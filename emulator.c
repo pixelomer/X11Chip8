@@ -198,7 +198,7 @@ void chip8_cycle(chip8_t *self) {
 			else if (opcode.n4 == 0xE) {
 				// 00EE (Flow) - Returns from a subroutine.
 				self->stack_pt--;
-				if (self->stack_pt >= 0x10) self->stack_pt = 0xF;
+				if (self->stack_pt >= sizeof(self->stack)) self->stack_pt = (sizeof(self->stack) - 1);
 				self->program_counter = self->stack[self->stack_pt];
 			}
 			break;
@@ -209,7 +209,7 @@ void chip8_cycle(chip8_t *self) {
 		case 0x2:
 			// 2NNN (Flow) - Calls subroutine at NNN.
 			self->stack[self->stack_pt++] = self->program_counter;
-			if (self->stack_pt >= 0x10) self->stack_pt = 0x0;
+			if (self->stack_pt >= sizeof(self->stack)) self->stack_pt = 0x0;
 			self->program_counter = opcode_value(opcode);
 			break;
 		#define case(a, cond) case a: if (cond) self->program_counter += 2; break;
@@ -295,15 +295,19 @@ void chip8_cycle(chip8_t *self) {
 			}
 			uint8_t x = self->registers[opcode.n2];
 			uint8_t y = self->registers[opcode.n3];
+			uint8_t xoffset = 0;
+			uint8_t yoffset = 0;
 			for (uint8_t yi=0; yi<height; yi++) {
+				if ((yi+y-yoffset) >= CHIP8_SCREEN_HEIGHT) yoffset = CHIP8_SCREEN_HEIGHT;
 				uint8_t line = lines[yi];
+				xoffset = 0;
 				for (uint8_t xi=0; xi<8; xi++) {
-					if ((xi+x) >= CHIP8_SCREEN_WIDTH) break;
+					if ((xi+x) >= CHIP8_SCREEN_WIDTH) xoffset = CHIP8_SCREEN_WIDTH;
 					bool value = !!((line << xi) & (1 << 7));
 					if (!value) continue;
-					bool old_value = self->framebuffer[x+xi][y+yi];
+					bool old_value = self->framebuffer[x+xi-xoffset][y+yi];
 					self->registers[0xF] = old_value && value;
-					self->framebuffer[x+xi][y+yi] = (old_value && value) ? !value : value;
+					self->framebuffer[x+xi-xoffset][y+yi] = (old_value && value) ? !value : value;
 				}
 			}
 			SIGNAL(CHIP8_REDRAW);
@@ -387,6 +391,12 @@ void chip8_cycle(chip8_t *self) {
 					self->memory[(self->mem_pt+2) % 0x1000] = remainder;
 					break;
 				}
+				#define FXN5_LEGACY_BEHAVIOR 1
+				#if FXN5_LEGACY_BEHAVIOR
+				#define NEXT(pt,offset) pt+offset
+				#else
+				#define NEXT(pt,offset) pt++
+				#endif
 				case 0x55: {
 					// FX55 (MEM)
 					// Stores V0 to VX (including VX) in memory starting at address I.
@@ -396,8 +406,10 @@ void chip8_cycle(chip8_t *self) {
 					// --------------------------------------------------------------
 					uint8_t register_index = opcode.n2;
 					for (uint8_t i=0; i < register_index+1; i++) {
-						self->memory[self->mem_pt+i] = self->registers[i];
+						self->memory[NEXT(self->mem_pt, i)] = self->registers[i];
+						#if !FXN5_LEGACY_BEHAVIOR
 						self->mem_pt = self->mem_pt % 0x1000;
+						#endif
 					}
 					break;
 				}
@@ -411,11 +423,15 @@ void chip8_cycle(chip8_t *self) {
 					// --------------------------------------------------------------
 					uint8_t register_index = opcode.n2;
 					for (uint8_t i=0; i < register_index+1; i++) {
-						self->registers[i] = self->memory[self->mem_pt+i];
+						self->registers[i] = self->memory[NEXT(self->mem_pt, i)];
+						#if !FXN5_LEGACY_BEHAVIOR
 						self->mem_pt = self->mem_pt % 0x1000;
+						#endif
 					}
 					break;
 				}
+				#undef FXN5_LEGACY_BEHAVIOR
+				#undef NEXT
 			}
 			break;
 	}
